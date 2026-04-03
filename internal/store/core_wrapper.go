@@ -98,8 +98,8 @@ func (cc *CoreClient) Stats() map[string]interface{} {
 }
 
 func convertQueryResult(qr *QueryResult) []QueryBboxRecord {
-	out := make([]QueryBboxRecord, 0, len(qr.AISRecords))
-	for _, r := range qr.AISRecords {
+	out := make([]QueryBboxRecord, 0, len(qr.AIS))
+	for _, r := range qr.AIS {
 		out = append(out, QueryBboxRecord{
 			Timestamp:  r.Timestamp,
 			Lat:        r.Lat,
@@ -112,7 +112,7 @@ func convertQueryResult(qr *QueryResult) []QueryBboxRecord {
 			StreamType: uint8(StreamAIS),
 		})
 	}
-	for _, r := range qr.FlightRecords {
+	for _, r := range qr.Flight {
 		out = append(out, QueryBboxRecord{
 			Timestamp:  r.Timestamp,
 			Lat:        r.Lat,
