@@ -1,0 +1,23 @@
+# Compiled binaries
+bin/
+ais-server
+*.test
+*.out
+
+# Build artifacts
+vendor/
+
+# IDE
+.idea/
+*.swp
+*.swo
+
+# Environment files (secrets)
+.env
+*.env.local
+
+# Log files
+*.log
+
+# OS
+.DS_Store
