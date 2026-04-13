@@ -1,237 +1,204 @@
 package store
 
-// #cgo LDFLAGS: -L../../../../jiskta-core/bin -lcore -Wl,-rpath,../../../../jiskta-core/bin
+// #cgo LDFLAGS: -L${SRCDIR}/../../../jiskta-core/bin -lcore -Wl,-rpath,${SRCDIR}/../../../jiskta-core/bin -luring
 // #include "libcore.h"
 // #include <stdlib.h>
 import "C"
 import (
-"fmt"
-"time"
-"unsafe"
+	"encoding/binary"
+	"fmt"
+	"unsafe"
 )
 
-// StreamType mirrors the Ada Stream_Types.Stream_Id values and the C constants.
+// StreamType mirrors the JKDB stream-type constants (STREAM_TYPE_* in libcore.h).
 type StreamType uint8
 
 const (
-StreamAIS     StreamType = 1
-StreamClimate StreamType = 2
-StreamFlight  StreamType = 3
-StreamIoT     StreamType = 4
-StreamGeneric StreamType = 255
-StreamAll     StreamType = 0 // query wildcard: match all stream types
+	StreamAIS     StreamType = 1
+	StreamClimate StreamType = 2
+	StreamFlight  StreamType = 3
+	StreamIoT     StreamType = 4
+	StreamGeneric StreamType = 255
+	StreamAll     StreamType = 0 // query wildcard: match all stream types
 )
 
-// AISRecord is the Go representation of ais_record_t (64 bytes).
-// Field order and types MUST match the C struct exactly.
+// AISRecord is the pure-Go representation of an AIS vessel position.
+// Used by pipeline.go to construct records; packed into EventRecord for write.
 type AISRecord struct {
-Timestamp     int64
-Lat           float32
-Lon           float32
-StreamType    uint8
-Flags         uint8
-SchemaVersion uint16
-MMSI          uint32
-SOG           uint16 // tenths of a knot
-COG           uint16 // tenths of a degree
-Heading       uint16
-NavStatus     uint8
-MsgType       uint8
-VesselType    uint16
-_             [30]uint8 // pad
+	Timestamp     int64   // Unix milliseconds
+	Lat           float32
+	Lon           float32
+	StreamType    uint8
+	Flags         uint8
+	SchemaVersion uint16
+	MMSI          uint32
+	SOG           uint16 // tenths of a knot
+	COG           uint16 // tenths of a degree
+	Heading       uint16
+	NavStatus     uint8
+	MsgType       uint8
+	VesselType    uint16
 }
 
-// FlightRecord is the Go representation of flight_record_t (64 bytes).
-type FlightRecord struct {
-Timestamp     int64
-Lat           float32
-Lon           float32
-StreamType    uint8
-Flags         uint8
-SchemaVersion uint16
-ICAO24        uint32
-Altitude      int32
-Velocity      uint16
-Heading       uint16
-VerticalRate  int16
-Callsign      [8]byte
-Squawk        uint16
-OnGround      uint8
-Category      uint8
-_             [18]uint8 // pad
+// EventRecord mirrors event_record_t (64 bytes) in the JKDB C ABI.
+// Memory layout MUST match the C struct exactly (natural alignment, no gaps).
+//
+//	offset  0: TimestampMs int64    (8)
+//	offset  8: Lat         float32  (4)
+//	offset 12: Lon         float32  (4)
+//	offset 16: Morton      uint64   (8)  — 0 = auto-compute in core_write_event
+//	offset 24: EntityHash  uint32   (4)  — AIS: MMSI as uint32
+//	offset 28: StreamType  uint8    (1)
+//	offset 29: Flags       uint8    (1)
+//	offset 30: SchemaVer   uint16   (2)
+//	offset 32: Payload     [32]byte (32)
+//	Total: 64 bytes
+type EventRecord struct {
+	TimestampMs int64
+	Lat         float32
+	Lon         float32
+	Morton      uint64
+	EntityHash  uint32
+	StreamType  uint8
+	Flags       uint8
+	SchemaVer   uint16
+	Payload     [32]byte
 }
 
-// Client wraps the libcore.so C API.
+// QueryIR mirrors query_ir_t (56 bytes) in the JKDB C ABI.
+//
+//	offset  0: TStartMs   int64    (8)
+//	offset  8: TEndMs     int64    (8)
+//	offset 16: LatMin     float32  (4)
+//	offset 20: LatMax     float32  (4)
+//	offset 24: LonMin     float32  (4)
+//	offset 28: LonMax     float32  (4)
+//	offset 32: DatasetID  uint32   (4)
+//	offset 36: StreamType uint32   (4)
+//	offset 40: EntityHash uint64   (8)  — 0 = no entity filter
+//	offset 48: Limit      uint32   (4)
+//	offset 52: SortDesc   uint8    (1)
+//	offset 53: Mode       uint8    (1)  — 0=RAW 1=STATS 2=DAILY 3=MONTHLY
+//	offset 54: Reserved   uint16   (2)
+//	Total: 56 bytes
+type QueryIR struct {
+	TStartMs   int64
+	TEndMs     int64
+	LatMin     float32
+	LatMax     float32
+	LonMin     float32
+	LonMax     float32
+	DatasetID  uint32
+	StreamType uint32
+	EntityHash uint64
+	Limit      uint32
+	SortDesc   uint8
+	Mode       uint8
+	Reserved   uint16
+}
+
+// Compile-time layout assertions.
+var _ = [64]struct{}{}[unsafe.Sizeof(EventRecord{}) - 64]
+var _ = [56]struct{}{}[unsafe.Sizeof(QueryIR{}) - 56]
+
+// Client wraps the libcore.so JKDB C API.
 type Client struct {
-dataDir string
+	dataDir string
 }
 
-// Init initialises the jiskta-core engine against the given data directory.
-// Call once at startup.
+// Init initialises the jiskta-core JKDB engine at dataDir.
 func Init(dataDir string) (*Client, error) {
-cDir := C.CString(dataDir)
-defer C.free(unsafe.Pointer(cDir))
-
-ret := C.core_init(cDir)
-if ret < 0 {
-return nil, fmt.Errorf("core_init failed: %d", ret)
-}
-return &Client{dataDir: dataDir}, nil
+	cDir := C.CString(dataDir)
+	defer C.free(unsafe.Pointer(cDir))
+	if ret := C.core_init(cDir); ret < 0 {
+		return nil, fmt.Errorf("core_init failed: %d", ret)
+	}
+	return &Client{dataDir: dataDir}, nil
 }
 
-// Close flushes pending writes and shuts down the engine.
-func (c *Client) Close() error {
-if ret := C.core_close(); ret < 0 {
-return fmt.Errorf("core_close failed: %d", ret)
-}
-return nil
+// Close shuts down the engine. core_close is a void procedure in Ada.
+func (c *Client) Close() {
+	C.core_close()
 }
 
-// WriteAIS writes a batch of AIS records using core_write_ais.
-func (c *Client) WriteAIS(records []AISRecord) error {
-if len(records) == 0 {
-return nil
-}
-ret := C.core_write_ais(
-(*C.ais_record_t)(unsafe.Pointer(&records[0])),
-C.int(len(records)),
-)
-if int(ret) != len(records) {
-return fmt.Errorf("core_write_ais: wrote %d of %d records", ret, len(records))
-}
-return nil
+// Flush commits all pending writes to persistent storage.
+func (c *Client) Flush() error {
+	if ret := C.core_flush(); ret < 0 {
+		return fmt.Errorf("core_flush failed: %d", ret)
+	}
+	return nil
 }
 
-// WriteFlight writes a batch of ADS-B flight records using core_write_flight.
-func (c *Client) WriteFlight(records []FlightRecord) error {
-if len(records) == 0 {
-return nil
-}
-ret := C.core_write_flight(
-(*C.flight_record_t)(unsafe.Pointer(&records[0])),
-C.int(len(records)),
-)
-if int(ret) != len(records) {
-return fmt.Errorf("core_write_flight: wrote %d of %d records", ret, len(records))
-}
-return nil
-}
-
-// WriteRaw writes arbitrary records using the generic core_write_raw path.
-// records must be a packed slice of record_size-byte elements, each starting
-// with the common 20-byte envelope.
-func (c *Client) WriteRaw(streamType StreamType, records []byte, recordSize uint16) error {
-if len(records) == 0 {
-return nil
-}
-n := len(records) / int(recordSize)
-ret := C.core_write_raw(
-C.uint8_t(streamType),
-(*C.uint8_t)(unsafe.Pointer(&records[0])),
-C.int(n),
-C.uint16_t(recordSize),
-)
-if int(ret) != n {
-return fmt.Errorf("core_write_raw: wrote %d of %d records", ret, n)
-}
-return nil
+// WriteEvent writes a batch of 64-byte event records.
+func (c *Client) WriteEvent(records []EventRecord) error {
+	if len(records) == 0 {
+		return nil
+	}
+	ret := C.core_write_event(
+		(*C.event_record_t)(unsafe.Pointer(&records[0])),
+		C.int(len(records)),
+	)
+	if int(ret) != len(records) {
+		return fmt.Errorf("core_write_event: wrote %d of %d records", ret, len(records))
+	}
+	return nil
 }
 
-// QueryResult holds the decoded result of a bbox or track query.
-type QueryResult struct {
-AIS    []AISRecord
-Flight []FlightRecord
-// Raw holds records of stream types not yet decoded by this client.
-Raw [][]byte
+// Query executes a JKDB query and returns the decoded event records.
+// Returns (records, truncated, error).
+func (c *Client) Query(ir QueryIR) ([]EventRecord, bool, error) {
+	raw := C.core_query((*C.query_ir_t)(unsafe.Pointer(&ir)))
+	if raw == nil {
+		return nil, false, fmt.Errorf("core_query returned nil")
+	}
+	defer C.core_free_result(raw)
+
+	n := int(raw.count)
+	truncated := raw.truncated != 0
+	if n == 0 || raw.records == nil {
+		return nil, truncated, nil
+	}
+
+	out := make([]EventRecord, n)
+	src := unsafe.Pointer(raw.records)
+	for i := range out {
+		out[i] = *(*EventRecord)(unsafe.Pointer(uintptr(src) + uintptr(i)*64))
+	}
+	return out, truncated, nil
 }
 
-// QueryBbox queries all streams for positions within the given bbox and time range.
-// Pass streamType=StreamAll (0) to return all stream types.
-// Pass mmsi=0 to skip MMSI filtering.
-func (c *Client) QueryBbox(
-latMin, latMax, lonMin, lonMax float32,
-tStart, tEnd time.Time,
-streamType StreamType,
-mmsi uint32,
-) (*QueryResult, error) {
-tsStart := C.int64_t(tStart.UnixMilli())
-tsEnd := C.int64_t(tEnd.UnixMilli())
-
-raw := C.core_query_bbox(
-C.float(latMin), C.float(latMax),
-C.float(lonMin), C.float(lonMax),
-tsStart, tsEnd,
-C.uint8_t(streamType),
-C.uint32_t(mmsi),
-)
-if raw == nil {
-return nil, fmt.Errorf("core_query_bbox returned nil")
-}
-defer C.core_free_result(raw)
-return decodeQueryResult(raw), nil
-}
-
-// QueryMMSI returns the full track for a single MMSI over the given time range.
-func (c *Client) QueryMMSI(mmsi uint32, tStart, tEnd time.Time) (*QueryResult, error) {
-raw := C.core_query_mmsi(
-C.uint32_t(mmsi),
-C.int64_t(tStart.UnixMilli()),
-C.int64_t(tEnd.UnixMilli()),
-)
-if raw == nil {
-return nil, fmt.Errorf("core_query_mmsi returned nil")
-}
-defer C.core_free_result(raw)
-return decodeQueryResult(raw), nil
-}
-
-// QueryICAO24 returns the full track for a single ICAO24 over the given time range.
-func (c *Client) QueryICAO24(icao24 uint32, tStart, tEnd time.Time) (*QueryResult, error) {
-raw := C.core_query_icao24(
-C.uint32_t(icao24),
-C.int64_t(tStart.UnixMilli()),
-C.int64_t(tEnd.UnixMilli()),
-)
-if raw == nil {
-return nil, fmt.Errorf("core_query_icao24 returned nil")
-}
-defer C.core_free_result(raw)
-return decodeQueryResult(raw), nil
-}
-
-// Stats returns a JSON string with engine stats (buffer fill, flushed count, etc.)
+// Stats returns a JSON string with last-query timing info from jiskta-core.
+// Falls back to a stub if core_last_query_timing returns nil.
 func (c *Client) Stats() string {
-return C.GoString(C.core_stats())
+	p := C.core_last_query_timing()
+	if p == nil {
+		return `{"plan_ns":0,"read_ns":0,"decode_ns":0}`
+	}
+	return C.GoString(p)
 }
 
-// decodeQueryResult reads the raw byte array returned by the C query functions
-// and dispatches each record to the appropriate Go slice based on stream_type
-// (byte 16 of the common envelope).
-func decodeQueryResult(raw *C.query_result_t) *QueryResult {
-n := int(raw.count)
-recSize := int(raw.record_size) // always 64 for JKST1 v1
-result := &QueryResult{}
-if n == 0 || raw.records == nil {
-return result
+// PackAISPayload writes AIS-specific fields into a 32-byte payload array
+// using little-endian byte order (matching the JKDB event record layout).
+func PackAISPayload(mmsi uint32, sog, cog, heading uint16, navStatus, msgType uint8, vesselType uint16) [32]byte {
+	var p [32]byte
+	binary.LittleEndian.PutUint32(p[0:4], mmsi)
+	binary.LittleEndian.PutUint16(p[4:6], sog)
+	binary.LittleEndian.PutUint16(p[6:8], cog)
+	binary.LittleEndian.PutUint16(p[8:10], heading)
+	p[10] = navStatus
+	p[11] = msgType
+	binary.LittleEndian.PutUint16(p[12:14], vesselType)
+	return p
 }
 
-base := uintptr(unsafe.Pointer(raw.records))
-for i := 0; i < n; i++ {
-ptr := base + uintptr(i*recSize)
-// Byte 16 = stream_type (offset 16 in the common envelope).
-stype := *(*uint8)(unsafe.Pointer(ptr + 16))
-switch StreamType(stype) {
-case StreamAIS:
-rec := *(*AISRecord)(unsafe.Pointer(ptr))
-result.AIS = append(result.AIS, rec)
-case StreamFlight:
-rec := *(*FlightRecord)(unsafe.Pointer(ptr))
-result.Flight = append(result.Flight, rec)
-default:
-raw := make([]byte, recSize)
-copy(raw, unsafe.Slice((*byte)(unsafe.Pointer(ptr)), recSize))
-result.Raw = append(result.Raw, raw)
-}
-}
-return result
+// DecodeAISPayload reads AIS-specific fields from a 32-byte payload array.
+func DecodeAISPayload(p [32]byte) (mmsi uint32, sog, cog, heading uint16, navStatus, msgType uint8, vesselType uint16) {
+	mmsi = binary.LittleEndian.Uint32(p[0:4])
+	sog = binary.LittleEndian.Uint16(p[4:6])
+	cog = binary.LittleEndian.Uint16(p[6:8])
+	heading = binary.LittleEndian.Uint16(p[8:10])
+	navStatus = p[10]
+	msgType = p[11]
+	vesselType = binary.LittleEndian.Uint16(p[12:14])
+	return
 }

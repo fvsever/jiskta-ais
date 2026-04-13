@@ -1,10 +1,6 @@
-// C header matching jiskta-core's libcore_ffi.ads exports.
+// JKDB C ABI header — jiskta-core v2 (JKDB engine)
 // Included by internal/store/core_client.go via CGo.
 // Must be kept in sync with src/ffi/libcore_ffi.ads in jiskta-core.
-//
-// Design: every record type starts with a common 20-byte spatial envelope.
-// Query results are returned as raw bytes; caller reads envelope.stream_type
-// to determine which concrete type to cast to.
 
 #ifndef LIBCORE_H
 #define LIBCORE_H
@@ -12,20 +8,7 @@
 #include <stdint.h>
 
 // ---------------------------------------------------------------------------
-// Common 20-byte spatial envelope -- at the start of EVERY record type.
-// The geohash indexer and query planner only read this struct.
-// ---------------------------------------------------------------------------
-typedef struct __attribute__((packed)) {
-    int64_t  timestamp;       // Unix milliseconds
-    float    lat;             // WGS-84 latitude
-    float    lon;             // WGS-84 longitude
-    uint8_t  stream_type;     // 1=AIS, 2=Climate, 3=Flight, 255=Generic
-    uint8_t  flags;           // reserved = 0
-    uint16_t schema_version;  // = 1 for all current types
-} envelope_t;
-
-// ---------------------------------------------------------------------------
-// Stream type constants (match Stream_Types.Stream_Id in Ada)
+// Stream type constants
 // ---------------------------------------------------------------------------
 #define STREAM_TYPE_AIS      1
 #define STREAM_TYPE_CLIMATE  2
@@ -34,117 +17,170 @@ typedef struct __attribute__((packed)) {
 #define STREAM_TYPE_GENERIC  255
 
 // ---------------------------------------------------------------------------
-// Concrete record types (64 bytes each, envelope at bytes 0-19)
+// Query output modes
 // ---------------------------------------------------------------------------
-
-// AIS position record (64 bytes)
-typedef struct __attribute__((packed)) {
-    int64_t  timestamp;       // offset  0 -- envelope
-    float    lat;             // offset  8
-    float    lon;             // offset 12
-    uint8_t  stream_type;     // offset 16 -- always STREAM_TYPE_AIS
-    uint8_t  flags;           // offset 17
-    uint16_t schema_version;  // offset 18
-    uint32_t mmsi;            // offset 20 -- AIS payload
-    uint16_t sog;             // offset 24 -- tenths of a knot
-    uint16_t cog;             // offset 26 -- tenths of a degree
-    uint16_t heading;         // offset 28
-    uint8_t  nav_status;      // offset 30
-    uint8_t  msg_type;        // offset 31
-    uint16_t vessel_type;     // offset 32
-    uint8_t  pad[30];         // offset 34 -- zero padding to 64 bytes
-} ais_record_t;
-
-// Climate point measurement record (64 bytes)
-typedef struct __attribute__((packed)) {
-    int64_t  timestamp;       // offset  0 -- envelope
-    float    lat;             // offset  8
-    float    lon;             // offset 12
-    uint8_t  stream_type;     // offset 16 -- always STREAM_TYPE_CLIMATE
-    uint8_t  flags;           // offset 17
-    uint16_t schema_version;  // offset 18
-    float    value;           // offset 20 -- measured value in canonical unit
-    float    anomaly;         // offset 24 -- deviation from climatological mean
-    uint8_t  variable_id;     // offset 28 -- see variable_id table in docs
-    uint8_t  source_id;       // offset 29 -- data source (CAMS=1, ERA5=2, ...)
-    uint8_t  quality;         // offset 30 -- 0=unknown, 1=NRT, 2=interim, 3=validated
-    uint8_t  unit_code;       // offset 31 -- physical unit (ug_m3=1, K=2, m_s=3, ...)
-    uint16_t grid_step_e4;    // offset 32 -- grid step in units of 0.0001 degrees
-    uint8_t  pad[30];         // offset 34
-} climate_record_t;
-
-// ADS-B flight record (64 bytes)
-typedef struct __attribute__((packed)) {
-    int64_t  timestamp;       // offset  0 -- envelope
-    float    lat;             // offset  8
-    float    lon;             // offset 12
-    uint8_t  stream_type;     // offset 16 -- always STREAM_TYPE_FLIGHT
-    uint8_t  flags;           // offset 17
-    uint16_t schema_version;  // offset 18
-    uint32_t icao24;          // offset 20 -- 24-bit ICAO aircraft address
-    int32_t  altitude;        // offset 24 -- barometric altitude in feet
-    uint16_t velocity;        // offset 28 -- ground speed in knots
-    uint16_t heading;         // offset 30 -- degrees true
-    int16_t  vertical_rate;   // offset 32 -- ft/min (positive = climbing)
-    char     callsign[8];     // offset 34 -- ICAO flight callsign (null-padded)
-    uint16_t squawk;          // offset 42 -- Mode-C transponder code
-    uint8_t  on_ground;       // offset 44 -- 1 if on ground
-    uint8_t  category;        // offset 45 -- ADS-B emitter category
-    uint8_t  pad[18];         // offset 46
-} flight_record_t;
+#define QUERY_MODE_RAW     0
+#define QUERY_MODE_STATS   1
+#define QUERY_MODE_DAILY   2
+#define QUERY_MODE_MONTHLY 3
 
 // ---------------------------------------------------------------------------
-// Query result
+// event_record_t — 64-byte unified JKDB event record (all stream types)
+// Morton=0 triggers auto-compute from lat/lon in core_write_event.
+//
+// Offsets (naturally aligned, no __packed needed):
+//   0:  timestamp_ms  int64    (8)
+//   8:  lat           float32  (4)
+//  12:  lon           float32  (4)
+//  16:  morton        uint64   (8)
+//  24:  entity_hash   uint32   (4)   AIS: MMSI
+//  28:  stream_type   uint8    (1)
+//  29:  flags         uint8    (1)
+//  30:  schema_ver    uint16   (2)
+//  32:  payload       uint8[32]
+// Total: 64 bytes
 // ---------------------------------------------------------------------------
-// records: raw bytes (n * 64 bytes).
-// Read envelope_t.stream_type to determine which concrete type to cast to.
-// Call core_free_result when done.
 typedef struct {
-    uint8_t  *records;      // raw bytes -- cast to ais_record_t / climate_record_t / etc.
-    uint16_t  record_size;  // always 64 for JKST1 v1
-    int       count;
-    int       truncated;    // 1 if MAX_QUERY_RESULTS was hit
+    int64_t  timestamp_ms;
+    float    lat;
+    float    lon;
+    uint64_t morton;
+    uint32_t entity_hash;
+    uint8_t  stream_type;
+    uint8_t  flags;
+    uint16_t schema_ver;
+    uint8_t  payload[32];
+} event_record_t;
+
+// AIS payload layout (payload[0..17]):
+//   [0..3]:  mmsi         uint32
+//   [4..5]:  sog          uint16   tenths of a knot
+//   [6..7]:  cog          uint16   tenths of a degree
+//   [8..9]:  heading      uint16
+//   [10]:    nav_status   uint8
+//   [11]:    msg_type     uint8
+//   [12..13]: vessel_type uint16
+//   [14..31]: zero pad
+
+// ---------------------------------------------------------------------------
+// raster_meta_t — metadata for a RASTER_BLOCK ingest
+// ---------------------------------------------------------------------------
+typedef struct {
+    uint32_t variable_id;
+    int64_t  time_start;
+    uint32_t time_step_ms;
+    uint32_t n_times;
+    uint32_t n_lats;
+    uint32_t n_lons;
+    float    lat_origin;
+    float    lon_origin;
+    float    lat_step;
+    float    lon_step;
+    float    scale;
+} raster_meta_t;
+
+// raster_row_t — 24-byte decoded raster cell returned by core_query_raster
+typedef struct {
+    int64_t  timestamp_ms;
+    float    lat;
+    float    lon;
+    float    value;
+    uint32_t variable_id;
+} raster_row_t;
+
+typedef struct {
+    raster_row_t *rows;
+    uint32_t      count;
+    uint8_t       truncated;
+    uint8_t       pad[3];
+} raster_result_t;
+
+// ---------------------------------------------------------------------------
+// query_ir_t — query intermediate representation (56 bytes)
+//
+// Offsets:
+//   0:  t_start_ms  int64    (8)
+//   8:  t_end_ms    int64    (8)
+//  16:  lat_min     float32  (4)
+//  20:  lat_max     float32  (4)
+//  24:  lon_min     float32  (4)
+//  28:  lon_max     float32  (4)
+//  32:  dataset_id  uint32   (4)
+//  36:  stream_type uint32   (4)
+//  40:  entity_hash uint64   (8)   0 = no entity filter
+//  48:  limit       uint32   (4)   0 = no limit
+//  52:  sort_desc   uint8    (1)
+//  53:  mode        uint8    (1)   QUERY_MODE_*
+//  54:  reserved    uint16   (2)
+// Total: 56 bytes
+// ---------------------------------------------------------------------------
+typedef struct {
+    int64_t  t_start_ms;
+    int64_t  t_end_ms;
+    float    lat_min;
+    float    lat_max;
+    float    lon_min;
+    float    lon_max;
+    uint32_t dataset_id;
+    uint32_t stream_type;
+    uint64_t entity_hash;
+    uint32_t limit;
+    uint8_t  sort_desc;
+    uint8_t  mode;
+    uint16_t reserved;
+} query_ir_t;
+
+// ---------------------------------------------------------------------------
+// query_result_t — event query result (16 bytes)
+// ---------------------------------------------------------------------------
+typedef struct {
+    event_record_t *records;
+    uint32_t        count;
+    uint8_t         truncated;
+    uint8_t         pad[3];
 } query_result_t;
+
+// agg_result_t — server-side aggregation result
+typedef struct {
+    uint64_t count;
+    double   sum;
+    float    min_val;
+    float    max_val;
+    float    mean;
+    float    p50;
+    float    p95;
+    uint8_t  truncated;
+    uint8_t  pad[3];
+    char     error[64];
+} agg_result_t;
 
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-int  core_init(const char *data_dir);
-int  core_close(void);
+int  core_init (const char *data_dir);
+void core_close(void);
+int  core_flush(void);
 
 // ---------------------------------------------------------------------------
-// Write -- typed variants
+// Write
 // ---------------------------------------------------------------------------
-int  core_write_ais    (const ais_record_t     *records, int n);
-int  core_write_climate(const climate_record_t *records, int n);
-int  core_write_flight (const flight_record_t  *records, int n);
-
-// Generic raw write: records is a packed array of record_size-byte records.
-// Only the first 20 bytes (common envelope) are parsed for indexing.
-int  core_write_raw(uint8_t stream_type,
-                    const uint8_t *records, int n, uint16_t record_size);
+int core_write_event (const event_record_t *records, int n);
+int core_write_raster(const float *data, raster_meta_t *meta);
 
 // ---------------------------------------------------------------------------
-// Query -- stream-type agnostic
+// Query
 // ---------------------------------------------------------------------------
-// stream_type = 0 means "all stream types".
-// mmsi = 0 means no MMSI filter (only relevant for AIS).
-query_result_t *core_query_bbox(float lat_min, float lat_max,
-                                float lon_min, float lon_max,
-                                int64_t t_start, int64_t t_end,
-                                uint8_t stream_type, uint32_t mmsi);
+query_result_t  *core_query         (query_ir_t *q);
+agg_result_t    *core_query_agg     (query_ir_t *q);
+raster_result_t *core_query_raster  (query_ir_t *q);
 
-query_result_t *core_query_mmsi  (uint32_t mmsi,
-                                   int64_t t_start, int64_t t_end);
-query_result_t *core_query_icao24(uint32_t icao24,
-                                   int64_t t_start, int64_t t_end);
-
-void core_free_result(query_result_t *result);
+void core_free_result        (query_result_t  *r);
+void core_free_agg_result    (agg_result_t    *r);
+void core_free_raster_result (raster_result_t *r);
 
 // ---------------------------------------------------------------------------
-// Introspection
+// Timing introspection
 // ---------------------------------------------------------------------------
-const char *core_stats(void);         // static JSON buffer -- do NOT free
-const char *core_stream_types(void);  // static JSON array -- do NOT free
+const char *core_last_query_timing(void);  // static JSON buffer — do NOT free
 
 #endif // LIBCORE_H

@@ -2,7 +2,6 @@ package store
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // CoreClient wraps the CGo Client with higher-level methods matching the API handlers.
@@ -12,7 +11,7 @@ type CoreClient struct {
 	c *Client
 }
 
-// NewCoreClient opens the jiskta-core store at dataDir.
+// NewCoreClient opens the jiskta-core JKDB store at dataDir.
 func NewCoreClient(dataDir string) (*CoreClient, error) {
 	c, err := Init(dataDir)
 	if err != nil {
@@ -21,14 +20,37 @@ func NewCoreClient(dataDir string) (*CoreClient, error) {
 	return &CoreClient{c: c}, nil
 }
 
-// Close releases the store handle.
-func (cc *CoreClient) Close() error {
-	return cc.c.Close()
+// Close releases the store handle (core_close is void in Ada — no error return).
+func (cc *CoreClient) Close() {
+	cc.c.Close()
 }
 
-// WriteAIS writes a batch of AIS records to the store (satisfies ingest.Storer interface).
+// Flush commits all pending writes.
+func (cc *CoreClient) Flush() error {
+	return cc.c.Flush()
+}
+
+// WriteAIS writes a batch of AIS records (satisfies ingest.Storer interface).
+// Each AISRecord is packed into a 64-byte EventRecord before being passed to the C layer.
 func (cc *CoreClient) WriteAIS(records []AISRecord) error {
-	return cc.c.WriteAIS(records)
+	if len(records) == 0 {
+		return nil
+	}
+	evts := make([]EventRecord, len(records))
+	for i, r := range records {
+		evts[i] = EventRecord{
+			TimestampMs: r.Timestamp,
+			Lat:         r.Lat,
+			Lon:         r.Lon,
+			Morton:      0, // auto-compute from lat/lon in core_write_event
+			EntityHash:  r.MMSI,
+			StreamType:  r.StreamType,
+			Flags:       r.Flags,
+			SchemaVer:   r.SchemaVersion,
+			Payload:     PackAISPayload(r.MMSI, r.SOG, r.COG, r.Heading, r.NavStatus, r.MsgType, r.VesselType),
+		}
+	}
+	return cc.c.WriteEvent(evts)
 }
 
 // QueryBboxRecord is the normalised record returned from a bbox query.
@@ -45,49 +67,50 @@ type QueryBboxRecord struct {
 }
 
 // QueryBbox queries the store for records in the given spatial and temporal range.
-// mmsi=0 returns all vessels; limit caps the result count.
+// mmsi=0 returns all vessels; limit=0 returns up to the engine default.
 func (cc *CoreClient) QueryBbox(
 	latMin, latMax, lonMin, lonMax float32,
 	tsStartMs, tsEndMs int64,
 	mmsi uint32, limit int,
 ) ([]QueryBboxRecord, error) {
-	tStart := time.UnixMilli(tsStartMs)
-	tEnd := time.UnixMilli(tsEndMs)
-
-	qr, err := cc.c.QueryBbox(latMin, latMax, lonMin, lonMax, tStart, tEnd, StreamAll, mmsi)
+	ir := QueryIR{
+		TStartMs:   tsStartMs,
+		TEndMs:     tsEndMs,
+		LatMin:     latMin,
+		LatMax:     latMax,
+		LonMin:     lonMin,
+		LonMax:     lonMax,
+		DatasetID:  1,
+		StreamType: uint32(StreamAIS),
+		EntityHash: uint64(mmsi),
+		Limit:      uint32(limit),
+	}
+	evts, _, err := cc.c.Query(ir)
 	if err != nil {
 		return nil, err
 	}
-	if qr == nil {
-		return []QueryBboxRecord{}, nil
-	}
-	result := convertQueryResult(qr)
-	if len(result) > limit {
-		result = result[:limit]
-	}
+	result := convertEventRecords(evts)
 	return result, nil
 }
 
 // QueryMMSI returns the full track for a single vessel in the time range.
 func (cc *CoreClient) QueryMMSI(mmsi uint32, tsStartMs, tsEndMs int64, limit int) ([]QueryBboxRecord, error) {
-	tStart := time.UnixMilli(tsStartMs)
-	tEnd := time.UnixMilli(tsEndMs)
-
-	qr, err := cc.c.QueryMMSI(mmsi, tStart, tEnd)
+	ir := QueryIR{
+		TStartMs:   tsStartMs,
+		TEndMs:     tsEndMs,
+		DatasetID:  1,
+		StreamType: uint32(StreamAIS),
+		EntityHash: uint64(mmsi),
+		Limit:      uint32(limit),
+	}
+	evts, _, err := cc.c.Query(ir)
 	if err != nil {
 		return nil, err
 	}
-	if qr == nil {
-		return []QueryBboxRecord{}, nil
-	}
-	result := convertQueryResult(qr)
-	if len(result) > limit {
-		result = result[:limit]
-	}
-	return result, nil
+	return convertEventRecords(evts), nil
 }
 
-// Stats returns human-readable coverage / stats JSON from the store.
+// Stats returns human-readable coverage/stats JSON from the store.
 func (cc *CoreClient) Stats() map[string]interface{} {
 	raw := cc.c.Stats()
 	var out map[string]interface{}
@@ -97,28 +120,27 @@ func (cc *CoreClient) Stats() map[string]interface{} {
 	return out
 }
 
-func convertQueryResult(qr *QueryResult) []QueryBboxRecord {
-	out := make([]QueryBboxRecord, 0, len(qr.AIS))
-	for _, r := range qr.AIS {
-		out = append(out, QueryBboxRecord{
-			Timestamp:  r.Timestamp,
-			Lat:        r.Lat,
-			Lon:        r.Lon,
-			MMSI:       r.MMSI,
-			SOG:        r.SOG,
-			COG:        r.COG,
-			Heading:    r.Heading,
-			NavStatus:  r.NavStatus,
-			StreamType: uint8(StreamAIS),
-		})
-	}
-	for _, r := range qr.Flight {
-		out = append(out, QueryBboxRecord{
-			Timestamp:  r.Timestamp,
-			Lat:        r.Lat,
-			Lon:        r.Lon,
-			StreamType: uint8(StreamFlight),
-		})
+// convertEventRecords converts a slice of raw JKDB EventRecord values into
+// normalised QueryBboxRecord values. Only AIS records are decoded; other
+// stream types are silently skipped.
+func convertEventRecords(evts []EventRecord) []QueryBboxRecord {
+	out := make([]QueryBboxRecord, 0, len(evts))
+	for _, e := range evts {
+		switch StreamType(e.StreamType) {
+		case StreamAIS:
+			mmsi, sog, cog, heading, navStatus, _, _ := DecodeAISPayload(e.Payload)
+			out = append(out, QueryBboxRecord{
+				Timestamp:  e.TimestampMs,
+				Lat:        e.Lat,
+				Lon:        e.Lon,
+				MMSI:       mmsi,
+				SOG:        sog,
+				COG:        cog,
+				Heading:    heading,
+				NavStatus:  navStatus,
+				StreamType: e.StreamType,
+			})
+		}
 	}
 	return out
 }
