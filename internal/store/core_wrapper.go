@@ -160,7 +160,8 @@ func (cc *CoreClient) Coverage() []CoverageSegment {
 //  1. Flush pending writes.
 //  2. Close the active segment (writes footer + fdatasync).
 //  3. Rename active.jkdb → segment_<unix-ns>.jkdb so the manifest picks it up.
-//  4. Re-initialise core on the same dataDir (creates a new active.jkdb).
+//  4. Compact the rotated Delta segment into a Morton-sorted Base segment (best-effort).
+//  5. Re-initialise core on the same dataDir (creates a new active.jkdb).
 //
 // The entire operation is synchronous; callers (e.g. midnight rotation goroutine)
 // must hold no other writes in flight concurrently.
@@ -176,10 +177,10 @@ func (cc *CoreClient) Rotate() error {
 	// 3. Rename active.jkdb → segment_<ts>.jkdb.
 	activePath := filepath.Join(cc.dataDir, "active.jkdb")
 	rotatedPath := filepath.Join(cc.dataDir, fmt.Sprintf("segment_%d.jkdb", time.Now().UnixNano()))
-	if err := os.Rename(activePath, rotatedPath); err != nil && !os.IsNotExist(err) {
-		// Non-fatal: active.jkdb may not exist if nothing was ever written.
-		// Log but continue so we still re-init cleanly.
-		_ = err
+	renameErr := os.Rename(activePath, rotatedPath)
+	if renameErr != nil && !os.IsNotExist(renameErr) {
+		_ = renameErr
+		rotatedPath = "" // no file to compact
 	}
 
 	// 4. Re-initialise — creates a fresh active.jkdb.
@@ -188,6 +189,17 @@ func (cc *CoreClient) Rotate() error {
 		return fmt.Errorf("rotate: re-init: %w", err)
 	}
 	cc.c = c
+
+	// 5. Compact the rotated segment (best-effort, non-blocking via goroutine).
+	if rotatedPath != "" {
+		go func() {
+			if err := cc.c.Compact(rotatedPath); err != nil {
+				// Log but do not fail rotation — Delta segment remains readable.
+				_ = err
+			}
+		}()
+	}
+
 	return nil
 }
 

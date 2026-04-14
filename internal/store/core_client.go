@@ -184,6 +184,18 @@ func (c *Client) Coverage() string {
 	return C.GoString(p)
 }
 
+// Compact compacts the closed Delta segment at deltaPath into a Morton-sorted Base
+// segment at the same path with a ".base.jkdb" suffix.
+// Returns a non-nil error if compaction fails.
+func (c *Client) Compact(deltaPath string) error {
+	cs := C.CString(deltaPath)
+	defer C.free(unsafe.Pointer(cs))
+	if ret := C.core_compact(cs); ret < 0 {
+		return fmt.Errorf("core_compact failed: %d", ret)
+	}
+	return nil
+}
+
 // PackAISPayload writes AIS-specific fields into a 32-byte payload array
 // using little-endian byte order (matching the JKDB event record layout).
 func PackAISPayload(mmsi uint32, sog, cog, heading uint16, navStatus, msgType uint8, vesselType uint16) [32]byte {

@@ -9,15 +9,29 @@ import (
 	"github.com/fvsever/jiskta-ais/internal/store"
 )
 
+// Authenticator is the auth interface used by the HTTP handlers.
+// *auth.SupabaseAuth satisfies this interface.
+type Authenticator interface {
+	ValidateKey(rawKey string) (*auth.KeyInfo, error)
+	UpdateCachedBalance(rawKey string, cost int64)
+	DeductCredits(apiKeyID string, cost int64, rawKey string)
+}
+
 // Server wires together the HTTP routes with auth and the core store.
 type Server struct {
 	mux    *http.ServeMux
-	auth   *auth.SupabaseAuth
+	auth   Authenticator
 	store  *store.CoreClient
 }
 
-// NewServer returns a configured Server.
+// NewServer returns a configured Server using the concrete Supabase auth provider.
 func NewServer(a *auth.SupabaseAuth, c *store.CoreClient) *Server {
+	return NewServerWithAuth(a, c)
+}
+
+// NewServerWithAuth returns a configured Server accepting any Authenticator
+// implementation.  This is the injection point used by tests (mock auth).
+func NewServerWithAuth(a Authenticator, c *store.CoreClient) *Server {
 	s := &Server{mux: http.NewServeMux(), auth: a, store: c}
 	s.mux.HandleFunc("/health", s.handleHealth)
 	s.mux.HandleFunc("/api/v1/ais/query", s.authMiddleware(s.handleQuery))
