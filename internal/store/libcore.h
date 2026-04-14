@@ -181,6 +181,24 @@ void core_free_raster_result (raster_result_t *r);
 // ---------------------------------------------------------------------------
 // Timing introspection
 // ---------------------------------------------------------------------------
-const char *core_last_query_timing(void);  // static JSON buffer — do NOT free
+// Returns a struct with plan_ns / read_ns / decode_ns for the last query.
+// NOTE: Ada FFI returns a C_Query_Timing struct by value; unused in Go.
+// const char *core_last_query_timing(void);
+
+// ---------------------------------------------------------------------------
+// Coverage
+// ---------------------------------------------------------------------------
+// Returns a static heap-allocated JSON string describing all known segments.
+// Format: [{"path":"...","t_min_ms":N,"t_max_ms":N,"dataset_id":N,"is_delta":true}, ...]
+// The returned pointer must NOT be freed — it is managed by jiskta-core.
+const char *core_coverage(void);
+
+// ---------------------------------------------------------------------------
+// Compaction
+// ---------------------------------------------------------------------------
+// Compact a closed Delta segment at delta_path into a Morton-sorted Base
+// segment written as <delta_path>_base.jkdb.
+// Returns 0=ok, -1=bad argument / not initialised, -2=compaction error.
+int core_compact(const char *delta_path);
 
 #endif // LIBCORE_H

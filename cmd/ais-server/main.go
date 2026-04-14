@@ -62,6 +62,23 @@ func main() {
 		log.Println("AISSTREAM_API_KEY not set — ingest disabled, API-only mode")
 	}
 
+	// --- Midnight segment rotation goroutine ---
+	// Rotates the active JKDB segment at UTC midnight every day so each segment
+	// covers at most one calendar day, keeping query ranges tight.
+	go func() {
+		for {
+			now := time.Now().UTC()
+			next := time.Date(now.Year(), now.Month(), now.Day()+1, 0, 0, 0, 0, time.UTC)
+			time.Sleep(time.Until(next))
+			log.Println("Midnight rotation: sealing active JKDB segment")
+			if err := coreClient.Rotate(); err != nil {
+				log.Printf("Segment rotation error: %v", err)
+			} else {
+				log.Println("Segment rotation complete")
+			}
+		}
+	}()
+
 	// --- Start HTTP server ---
 	go func() {
 		log.Printf("jiskta-ais listening on :%s", port)

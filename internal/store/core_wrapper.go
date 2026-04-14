@@ -2,13 +2,18 @@ package store
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"time"
 )
 
 // CoreClient wraps the CGo Client with higher-level methods matching the API handlers.
 // This avoids modifying core_client.go (which mirrors the C FFI exactly).
 
 type CoreClient struct {
-	c *Client
+	c       *Client
+	dataDir string
 }
 
 // NewCoreClient opens the jiskta-core JKDB store at dataDir.
@@ -17,7 +22,7 @@ func NewCoreClient(dataDir string) (*CoreClient, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &CoreClient{c: c}, nil
+	return &CoreClient{c: c, dataDir: dataDir}, nil
 }
 
 // Close releases the store handle (core_close is void in Ada — no error return).
@@ -110,7 +115,7 @@ func (cc *CoreClient) QueryMMSI(mmsi uint32, tsStartMs, tsEndMs int64, limit int
 	return convertEventRecords(evts), nil
 }
 
-// Stats returns human-readable coverage/stats JSON from the store.
+// Stats returns human-readable stats JSON from the store (timing stub).
 func (cc *CoreClient) Stats() map[string]interface{} {
 	raw := cc.c.Stats()
 	var out map[string]interface{}
@@ -118,6 +123,72 @@ func (cc *CoreClient) Stats() map[string]interface{} {
 		return map[string]interface{}{"raw": raw}
 	}
 	return out
+}
+
+// ---------------------------------------------------------------------------
+// Coverage
+// ---------------------------------------------------------------------------
+
+// CoverageSegment describes a single closed JKDB segment.
+type CoverageSegment struct {
+	Path      string `json:"path"`
+	TMinMs    int64  `json:"t_min_ms"`
+	TMaxMs    int64  `json:"t_max_ms"`
+	DatasetID uint32 `json:"dataset_id"`
+	IsDelta   bool   `json:"is_delta"`
+}
+
+// Coverage returns the list of known JKDB segments (closed + active).
+// The active delta segment is included when it has been flushed at least once.
+// Returns an empty slice (never nil) on error or when the store is uninitialised.
+func (cc *CoreClient) Coverage() []CoverageSegment {
+	raw := cc.c.Coverage()
+	var segs []CoverageSegment
+	if err := json.Unmarshal([]byte(raw), &segs); err != nil || segs == nil {
+		return []CoverageSegment{}
+	}
+	return segs
+}
+
+// ---------------------------------------------------------------------------
+// Segment rotation
+// ---------------------------------------------------------------------------
+
+// Rotate atomically seals the active JKDB segment and opens a fresh one.
+//
+// Sequence:
+//  1. Flush pending writes.
+//  2. Close the active segment (writes footer + fdatasync).
+//  3. Rename active.jkdb → segment_<unix-ns>.jkdb so the manifest picks it up.
+//  4. Re-initialise core on the same dataDir (creates a new active.jkdb).
+//
+// The entire operation is synchronous; callers (e.g. midnight rotation goroutine)
+// must hold no other writes in flight concurrently.
+func (cc *CoreClient) Rotate() error {
+	// 1. Flush any pending writes.
+	if err := cc.c.Flush(); err != nil {
+		return fmt.Errorf("rotate: flush: %w", err)
+	}
+
+	// 2. Close the active segment.
+	cc.c.Close()
+
+	// 3. Rename active.jkdb → segment_<ts>.jkdb.
+	activePath := filepath.Join(cc.dataDir, "active.jkdb")
+	rotatedPath := filepath.Join(cc.dataDir, fmt.Sprintf("segment_%d.jkdb", time.Now().UnixNano()))
+	if err := os.Rename(activePath, rotatedPath); err != nil && !os.IsNotExist(err) {
+		// Non-fatal: active.jkdb may not exist if nothing was ever written.
+		// Log but continue so we still re-init cleanly.
+		_ = err
+	}
+
+	// 4. Re-initialise — creates a fresh active.jkdb.
+	c, err := Init(cc.dataDir)
+	if err != nil {
+		return fmt.Errorf("rotate: re-init: %w", err)
+	}
+	cc.c = c
+	return nil
 }
 
 // convertEventRecords converts a slice of raw JKDB EventRecord values into

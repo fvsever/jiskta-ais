@@ -138,8 +138,8 @@ func (c *Client) WriteEvent(records []EventRecord) error {
 		(*C.event_record_t)(unsafe.Pointer(&records[0])),
 		C.int(len(records)),
 	)
-	if int(ret) != len(records) {
-		return fmt.Errorf("core_write_event: wrote %d of %d records", ret, len(records))
+	if int(ret) < 0 {
+		return fmt.Errorf("core_write_event failed: code %d", ret)
 	}
 	return nil
 }
@@ -167,12 +167,19 @@ func (c *Client) Query(ir QueryIR) ([]EventRecord, bool, error) {
 	return out, truncated, nil
 }
 
-// Stats returns a JSON string with last-query timing info from jiskta-core.
-// Falls back to a stub if core_last_query_timing returns nil.
+// Stats returns a stub timing JSON (core_last_query_timing has an ABI mismatch;
+// kept here for backward compatibility with any callers).
 func (c *Client) Stats() string {
-	p := C.core_last_query_timing()
+	return `{"plan_ns":0,"read_ns":0,"decode_ns":0}`
+}
+
+// Coverage returns the raw JSON string returned by core_coverage().
+// Format: [{"path":"...","t_min_ms":N,"t_max_ms":N,"dataset_id":N,"is_delta":true},...]
+// Returns "[]" if the store is uninitialised or has no segments.
+func (c *Client) Coverage() string {
+	p := C.core_coverage()
 	if p == nil {
-		return `{"plan_ns":0,"read_ns":0,"decode_ns":0}`
+		return "[]"
 	}
 	return C.GoString(p)
 }
