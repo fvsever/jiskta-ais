@@ -65,41 +65,42 @@ type EventRecord struct {
 	Payload     [32]byte
 }
 
-// QueryIR mirrors query_ir_t (56 bytes) in the JKDB C ABI.
-//
-//	offset  0: TStartMs   int64    (8)
-//	offset  8: TEndMs     int64    (8)
-//	offset 16: LatMin     float32  (4)
-//	offset 20: LatMax     float32  (4)
-//	offset 24: LonMin     float32  (4)
-//	offset 28: LonMax     float32  (4)
-//	offset 32: DatasetID  uint32   (4)
-//	offset 36: StreamType uint32   (4)
-//	offset 40: EntityHash uint64   (8)  — 0 = no entity filter
-//	offset 48: Limit      uint32   (4)
-//	offset 52: SortDesc   uint8    (1)
-//	offset 53: Mode       uint8    (1)  — 0=RAW 1=STATS 2=DAILY 3=MONTHLY
-//	offset 54: Reserved   uint16   (2)
-//	Total: 56 bytes
+// QueryIR mirrors query_ir_t (600 bytes) in the JKDB C ABI.
+// MUST match jiskta-core/src/ffi/libcore_ffi.ads C_Query_IR layout exactly.
+// AIS does not currently use the Q2-* push-down filters, but the struct must
+// match the Ada-side size to avoid uninitialised-memory reads.
 type QueryIR struct {
-	TStartMs   int64
-	TEndMs     int64
-	LatMin     float32
-	LatMax     float32
-	LonMin     float32
-	LonMax     float32
-	DatasetID  uint32
-	StreamType uint32
-	EntityHash uint64
-	Limit      uint32
-	SortDesc   uint8
-	Mode       uint8
-	Reserved   uint16
+	TStartMs          int64       //   0
+	TEndMs            int64       //   8
+	LatMin            float32     //  16
+	LatMax            float32     //  20
+	LonMin            float32     //  24
+	LonMax            float32     //  28
+	DatasetID         uint32      //  32
+	StreamType        uint32      //  36
+	EntityHash        uint64      //  40
+	Limit             uint32      //  48
+	SortDesc          uint8       //  52
+	Mode              uint8       //  53
+	Reserved          uint16      //  54
+	OffsetRows        uint32      //  56
+	EntityHashCount   uint8       //  60
+	PayloadOffsetB    uint8       //  61
+	PayloadOp         uint8       //  62
+	Pad3              uint8       //  63
+	PayloadValue      float32     //  64
+	Pad4              uint32      //  68
+	EntityHashList    [64]uint64  //  72
+	RouteHashFilter   uint32      // 584
+	VehicleTypeFilter uint8       // 588
+	OperatorIDFilter  uint8       // 589
+	Pad5              uint16      // 590
+	Pad6              uint64      // 592 (struct = 600 bytes)
 }
 
 // Compile-time layout assertions.
 var _ = [64]struct{}{}[unsafe.Sizeof(EventRecord{}) - 64]
-var _ = [56]struct{}{}[unsafe.Sizeof(QueryIR{}) - 56]
+var _ = [600]struct{}{}[unsafe.Sizeof(QueryIR{}) - 600]
 
 // Client wraps the libcore.so JKDB C API.
 type Client struct {

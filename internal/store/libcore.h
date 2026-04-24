@@ -96,38 +96,39 @@ typedef struct {
 } raster_result_t;
 
 // ---------------------------------------------------------------------------
-// query_ir_t — query intermediate representation (56 bytes)
-//
-// Offsets:
-//   0:  t_start_ms  int64    (8)
-//   8:  t_end_ms    int64    (8)
-//  16:  lat_min     float32  (4)
-//  20:  lat_max     float32  (4)
-//  24:  lon_min     float32  (4)
-//  28:  lon_max     float32  (4)
-//  32:  dataset_id  uint32   (4)
-//  36:  stream_type uint32   (4)
-//  40:  entity_hash uint64   (8)   0 = no entity filter
-//  48:  limit       uint32   (4)   0 = no limit
-//  52:  sort_desc   uint8    (1)
-//  53:  mode        uint8    (1)   QUERY_MODE_*
-//  54:  reserved    uint16   (2)
-// Total: 56 bytes
+// query_ir_t — query intermediate representation (600 bytes)
+// MUST mirror Ada side libcore_ffi.ads C_Query_IR exactly.
+// AIS does not currently use the Q2-* push-down filters, but the struct
+// layout MUST match what Ada reads to avoid uninitialized-memory reads.
+// All fields beyond byte 56 are zero-initialised by Go cgo struct literals.
 // ---------------------------------------------------------------------------
 typedef struct {
-    int64_t  t_start_ms;
-    int64_t  t_end_ms;
-    float    lat_min;
-    float    lat_max;
-    float    lon_min;
-    float    lon_max;
-    uint32_t dataset_id;
-    uint32_t stream_type;
-    uint64_t entity_hash;
-    uint32_t limit;
-    uint8_t  sort_desc;
-    uint8_t  mode;
-    uint16_t reserved;
+    int64_t  t_start_ms;            //   0
+    int64_t  t_end_ms;              //   8
+    float    lat_min;               //  16
+    float    lat_max;               //  20
+    float    lon_min;               //  24
+    float    lon_max;               //  28
+    uint32_t dataset_id;            //  32
+    uint32_t stream_type;           //  36
+    uint64_t entity_hash;           //  40
+    uint32_t limit;                 //  48
+    uint8_t  sort_desc;             //  52
+    uint8_t  mode;                  //  53
+    uint16_t reserved;              //  54
+    uint32_t offset_rows;           //  56
+    uint8_t  entity_hash_count;     //  60  Q2-B: 0 = disabled
+    uint8_t  payload_offset_b;      //  61
+    uint8_t  payload_op;            //  62
+    uint8_t  pad3;                  //  63
+    float    payload_value;         //  64
+    uint32_t pad4;                  //  68
+    uint64_t entity_hash_list[64];  //  72
+    uint32_t route_hash_filter;     // 584  transit-only, ignored for AIS (=0)
+    uint8_t  vehicle_type_filter;   // 588  transit-only (sentinel 0xFF)
+    uint8_t  operator_id_filter;    // 589  transit-only (=0)
+    uint16_t pad5;                  // 590
+    uint64_t pad6;                  // 592 (struct = 600 bytes)
 } query_ir_t;
 
 // ---------------------------------------------------------------------------
